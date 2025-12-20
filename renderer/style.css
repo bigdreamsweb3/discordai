@@ -1,0 +1,58 @@
+body {
+  font-family: "Segoe UI", sans-serif;
+  background: #1e1e1e;
+  color: #fff;
+  margin: 0;
+  padding: 20px;
+}
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+}
+h1 {
+  text-align: center;
+}
+.status {
+  text-align: center;
+  font-weight: bold;
+}
+.running {
+  color: #43b581;
+}
+
+.section {
+  background: #2d2d2d;
+  padding: 20px;
+  border-radius: 10px;
+  margin: 20px 0;
+}
+
+input,
+button {
+  padding: 10px;
+  margin: 5px;
+  font-size: 14px;
+}
+
+button {
+  background: #5865f2;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #4752c4;
+}
+
+pre#logs {
+  background: #111;
+  padding: 15px;
+  height: 400px;
+  overflow-y: auto;
+  border-radius: 8px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}

@@ -1,0 +1,53 @@
+{
+  "name": "dcai-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "start1": "node index-one-channels.js",
+    "start-electron": "electron .",
+    "build-electron": "electron-builder",
+    "build-win-electron": "electron-builder --win",
+    "// Git Commands": "--------------------Git Commands-------------------",
+    "git-commit-push": "git diff-index --quiet HEAD || (git add . && git commit -m \"Something just got updated!\" --allow-empty && git push origin main)",
+    "git-commit-push-force": "git add . && git commit -m \"Something just got updated!\" --no-verify --allow-empty && git push origin main --force"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "discord.js": "^14.25.1",
+    "discord.js-selfbot-v13": "^3.7.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "node-cron": "^4.2.1",
+    "puppeteer": "^24.33.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.dcai.dcmonitor",
+    "productName": "Discord Channel Monitor",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "**/*",
+      "!dist",
+      "!assets/*.psd"
+    ]
+  }
+}

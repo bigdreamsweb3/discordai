@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Discord Channel Monitor</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Discord Channel Monitor</h1>
+      <p class="status running">● Running</p>
+
+      <div class="section">
+        <h2>Add Channel to Monitor</h2>
+        <input
+          type="text"
+          id="serverId"
+          placeholder="Server/Guild ID (e.g. 1451532169695727799)"
+        />
+        <input
+          type="text"
+          id="channelId"
+          placeholder="Channel ID (e.g. 1451532170572206155)"
+        />
+        <button id="addBtn">Add Channel</button>
+        <p>
+          <small>Current: <code id="currentUrl">Loading...</code></small>
+        </p>
+      </div>
+
+      <div class="section">
+        <h2>Live Logs</h2>
+        <pre id="logs"></pre>
+      </div>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
