@@ -41,7 +41,7 @@ async function launchBrowser({
   };
 
   if (usePersistentSession) {
-    // launchOptions.userDataDir = path.resolve(__dirname, "../discord-session");
+    launchOptions.userDataDir = path.resolve(__dirname, "../discord-session");
   }
 
   const browser = await puppeteer.launch(launchOptions);
