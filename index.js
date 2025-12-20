@@ -122,7 +122,8 @@ function setupKeepAlive() {
   if (keepAliveInterval) clearInterval(keepAliveInterval);
 
   // Get server URL from environment or build it
-  const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
+  const port = process.env.PORT || 3000; // fallback for local dev if needed
+  const serverUrl = process.env.SERVER_URL || `http://localhost:${port}`;
   const fullServerUrl = serverUrl.includes("://")
     ? serverUrl
     : `https://${serverUrl}`;
@@ -230,9 +231,7 @@ function setupKeepAlive() {
           });
           res.on("end", () => {
             if (pingData.length > 0) {
-              log(
-                `Ping service response: ${pingData.substring(0, 100)}`
-              );
+              log(`Ping service response: ${pingData.substring(0, 100)}`);
             }
           });
         }
@@ -255,6 +254,23 @@ function setupKeepAlive() {
 
   log("Keep-alive ping mechanism initialized");
 }
+
+const express = require("express");
+const app = express();
+
+app.get("/ping", (req, res) => {
+  res.status(200).send("pong");
+});
+
+// Optional: health check
+app.get("/", (req, res) => {
+  res.status(200).send("Monitor running");
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, "0.0.0.0", () => {
+  log(`Keep-alive server listening on port ${port}`);
+});
 
 // Keep process alive
 setInterval(() => {}, 1 << 30);
