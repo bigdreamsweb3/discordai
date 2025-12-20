@@ -2,65 +2,21 @@
 
 const puppeteer = require("puppeteer-extra");
 const path = require("path");
-const fs = require("fs");
 const { log } = require("../utils/logger");
 
 // Stealth plugin setup
 const stealth = require("puppeteer-extra-plugin-stealth");
 const enabledEvasions = new Set(stealth.availableEvasions);
-enabledEvasions.delete("sourceurl"); // Optional
+enabledEvasions.delete("sourceurl"); // Optional: avoids known issues
 
 puppeteer.use(stealth({ enabledEvasions }));
 
 let persistentBrowser = null;
 
-// Helper to dynamically find the installed Chrome binary
-function getChromeExecutablePath() {
-  const baseDir = path.join(process.cwd(), "chrome", "chrome");
-
-  if (!fs.existsSync(baseDir)) {
-    throw new Error(
-      "Chrome directory not found at ./chrome/chrome – postinstall may have failed"
-    );
-  }
-
-  const versionDirs = fs
-    .readdirSync(baseDir)
-    .filter(
-      (f) =>
-        f.startsWith("linux-") &&
-        fs.statSync(path.join(baseDir, f)).isDirectory()
-    );
-
-  if (versionDirs.length === 0) {
-    throw new Error("No Chrome version directory found in ./chrome/chrome");
-  }
-
-  // Sort to get the latest version
-  versionDirs.sort().reverse();
-  const latestVersion = versionDirs[0];
-
-  const chromePath = path.join(
-    baseDir,
-    latestVersion,
-    "chrome-linux64",
-    "chrome"
-  );
-
-  if (!fs.existsSync(chromePath)) {
-    throw new Error(`Chrome binary not found at expected path: ${chromePath}`);
-  }
-
-  log(`Using custom Chrome binary: ${chromePath}`);
-  return chromePath;
-}
-
 async function launchBrowser({
   headful = false,
   usePersistentSession = true,
 } = {}) {
-  const executablePath = getChromeExecutablePath();
-
   log(
     `Launching browser (${
       headful ? "headful" : "headless"
@@ -68,21 +24,18 @@ async function launchBrowser({
   );
 
   const launchOptions = {
-    headless: headful ? false : "new",
-    executablePath, // ← Critical: point to your bundled Chrome
-    defaultViewport: null,
+    headless: headful ? false : "new", // "new" for modern headless, false for visible
+    defaultViewport: null, // THIS IS KEY: Let the browser use full window size
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--start-maximized",
+      "--start-maximized", // Maximizes the window (works in both headless & headful)
       "--disable-blink-features=AutomationControlled",
       "--disable-infobars",
       "--disable-web-security",
       "--allow-running-insecure-content",
+      // Optional: better for Discord
       "--window-position=0,0",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-zygote",
     ],
     ignoreDefaultArgs: ["--enable-automation"],
   };
@@ -95,20 +48,27 @@ async function launchBrowser({
 
   if (usePersistentSession) {
     persistentBrowser = browser;
-    log("Persistent browser saved for reuse");
+    log("Persistent browser saved for reuse (new tabs can be opened)");
   }
 
   const page = await browser.newPage();
 
-  // Manual stealth tweaks (extra safety)
+  // Manual stealth tweaks
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    Object.defineProperty(navigator, "webdriver", {
+      get: () => false,
+    });
     delete navigator.__proto__.webdriver;
+
+    // Optional: hide puppeteer traces
     window.chrome = { runtime: {} };
     window.puppeteer = undefined;
   });
 
-  // Maximize in headful mode
+  // REMOVED THIS LINE COMPLETELY:
+  // await page.setViewport({ width: 1920, height: 1080 });
+
+  // Optional: For extra realism in headful mode, maximize the first window
   if (headful) {
     const session = await page.target().createCDPSession();
     const { windowId } = await session.send("Browser.getWindowForTarget");
