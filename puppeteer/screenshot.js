@@ -1,14 +1,17 @@
 // puppeteer/screenshot.js
 const path = require("path");
 const fs = require("fs"); // Added for mkdirSync
-const { screenshotsDir } = require("../utils/directories");
+const {
+  screenshotsDir,
+  profileScreenshotsDir,
+} = require("../utils/directories");
 const { log } = require("../utils/logger");
 
-// Define profile screenshots subdirectory (consistent with main screenshotsDir)
-const profileScreenshotsDir = path.join(
-  screenshotsDir,
-  "discovered_new_profile"
-);
+// // Define profile screenshots subdirectory (consistent with main screenshotsDir)
+// const profileScreenshotsDir = path.join(
+//   screenshotsDir,
+//   "discovered_new_profile"
+// );
 
 // Ensure the profile directory exists
 if (!fs.existsSync(profileScreenshotsDir)) {

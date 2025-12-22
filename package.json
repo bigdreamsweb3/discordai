@@ -2,7 +2,7 @@
   "name": "dcai-bot",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
@@ -10,7 +10,6 @@
     "start-electron": "electron .",
     "build-electron": "electron-builder",
     "build-win-electron": "electron-builder --win",
-    "postinstall": "npx @puppeteer/browsers install chrome --path ./chrome",
     "// Git Commands": "--------------------Git Commands-------------------",
     "git-commit-push": "git diff-index --quiet HEAD || (git add . && git commit -m \"Something just got updated!\" --allow-empty && git push origin main)",
     "git-commit-push-force": "git add . && git commit -m \"Something just got updated!\" --no-verify --allow-empty && git push origin main --force"
@@ -21,6 +20,7 @@
   "type": "commonjs",
   "dependencies": {
     "@discordjs/voice": "^0.19.0",
+    "chrome-paths": "^1.0.1",
     "discord.js": "^14.25.1",
     "discord.js-selfbot-v13": "^3.7.1",
     "dotenv": "^17.2.3",
@@ -36,19 +36,30 @@
   },
   "build": {
     "appId": "com.dcai.dcmonitor",
-    "productName": "Discord Channel Monitor",
+    "productName": "DCAI",
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
     },
     "files": [
       "**/*",
       "!dist",
       "!assets/*.psd"
+    ],
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": "."
+      },
+      {
+        "from": "config.json",
+        "to": "."
+      }
     ]
   }
 }

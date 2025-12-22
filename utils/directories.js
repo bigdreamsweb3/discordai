@@ -1,17 +1,28 @@
 // utils/directories.js
-const fs = require("fs");
+
+const { app } = require("electron");
 const path = require("path");
+const fs = require("fs");
 
-const screenshotsDir = path.join(__dirname, "..", "screenshots");
+// Base directories in userData (writable & persistent)
+const baseDir = app.getPath("userData"); // e.g., %APPDATA%/DCAI on Windows
 
-const profilescreenshotsDir = path.join(
-  __dirname,
-  "..",
-  "/screenshots/discovered_new_profile/"
+const screenshotsDir = path.join(baseDir, "screenshots");
+const profileScreenshotsDir = path.join(
+  screenshotsDir,
+  "discovered_new_profile"
 );
-const logsDir = path.join(__dirname, "..", "logs");
+const logsDir = path.join(baseDir, "logs");
 
-if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir);
-if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir);
+// Create all directories if they don't exist
+[screenshotsDir, profileScreenshotsDir, logsDir].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
 
-module.exports = { screenshotsDir, profilescreenshotsDir, logsDir };
+module.exports = {
+  screenshotsDir,
+  profileScreenshotsDir, // renamed for consistency
+  logsDir,
+};

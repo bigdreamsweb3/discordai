@@ -3,7 +3,9 @@ node_modules/
 
 # Puppeteer / browser sessions
 discord-session/
+discord-session-temp/
 screenshots/
+dist/
 
 
 # Runtime data
