@@ -1,20 +1,20 @@
-// utils/queue-worker.js
-
 const fs = require("fs");
 const { randomUUID } = require("crypto");
 const { log } = require("./logger");
+const { baseDir } = require("./directories");
+const path = require("path");
 
 class QueueWorker {
-  constructor(file = "data/author_queue.json") {
+  constructor(file = path.join(baseDir, "author_queue.json")) {
     this.file = file;
     this.queue = [];
     this.processing = false;
     this.seenUsers = new Set();
     this.isRunning = false;
+    this.saveTimeout = null;
 
-    // Tab reuse across tasks and channels
-    this.currentPage = null; // Single page instance
-    this.currentChannelUrl = null; // Current loaded channel URL
+    this.currentPage = null;
+    this.currentChannelId = null;
 
     this.loadFromDisk();
   }
@@ -22,93 +22,75 @@ class QueueWorker {
   loadFromDisk() {
     try {
       if (!fs.existsSync(this.file)) {
-        fs.mkdirSync("data", { recursive: true });
+        if (!fs.existsSync(path.dirname(this.file)))
+          fs.mkdirSync(path.dirname(this.file), { recursive: true });
         fs.writeFileSync(this.file, JSON.stringify({ queue: [], seen: [] }));
       }
-
-      const raw = fs.readFileSync(this.file, "utf-8");
-      const data = JSON.parse(raw);
-
-      this.queue = (data.queue || []).map((task) => {
-        if (task.status === "processing") task.status = "pending";
-        task.retryCount = task.retryCount || 0;
-        return task;
-      });
-
+      const data = JSON.parse(fs.readFileSync(this.file, "utf-8"));
+      this.queue = (data.queue || []).map((t) => ({
+        ...t,
+        status: t.status === "processing" ? "pending" : t.status,
+      }));
       (data.seen || []).forEach((u) => this.seenUsers.add(u));
-
-      console.log(
-        `Queue loaded: ${this.queue.length} tasks, ${this.seenUsers.size} unique users seen`
-      );
+      log(`📦 Queue loaded: ${this.queue.length} items.`);
     } catch (err) {
-      console.error("Failed to load queue, starting fresh:", err.message);
+      log(`⚠️ Load error: ${err.message}`);
       this.queue = [];
-      this.seenUsers = new Set();
     }
   }
 
+  /**
+   * Debounced save to prevent disk hammering during heavy traffic
+   */
   saveToDisk() {
-    try {
-      const data = {
-        queue: this.queue,
-        seen: Array.from(this.seenUsers),
-      };
-      fs.writeFileSync(this.file, JSON.stringify(data, null, 2));
-    } catch (err) {
-      console.error("Failed to save queue:", err.message);
-    }
+    if (this.saveTimeout) return;
+    this.saveTimeout = setTimeout(() => {
+      try {
+        const data = { queue: this.queue, seen: Array.from(this.seenUsers) };
+        fs.writeFileSync(this.file, JSON.stringify(data, null, 2));
+        this.saveTimeout = null;
+      } catch (err) {
+        log(`❌ Save error: ${err.message}`);
+      }
+    }, 500);
   }
 
   addAuthor(channelId, messageId, authorName, channelLink, replyInfo = null) {
-    const cleanAuthorName = authorName?.trim();
-    if (!cleanAuthorName) return;
+    const cleanName = authorName?.trim();
+    if (!cleanName || this.seenUsers.has(cleanName)) return;
 
-    if (this.seenUsers.has(cleanAuthorName)) {
-      console.log(`Skipping duplicate user: ${cleanAuthorName}`);
-      return;
-    }
+    // Extract Server ID from Link
+    const serverIdMatch = channelLink.match(/channels\/(\d+|@me)/);
+    const serverId = serverIdMatch ? serverIdMatch[1] : "@me";
 
-    const task = {
+    this.queue.push({
       id: randomUUID(),
+      serverId,
       channelId,
       messageId,
-      authorName: cleanAuthorName,
+      authorName: cleanName,
       channelLink,
       status: "pending",
       addedAt: new Date().toISOString(),
-      replyInfo,
       retryCount: 0,
-    };
+    });
 
-    this.queue.push(task);
-    this.seenUsers.add(cleanAuthorName);
+    this.seenUsers.add(cleanName);
     this.saveToDisk();
-
-    const extra = replyInfo ? ` (reply to @${replyInfo.username})` : "";
-    console.log(`Added to queue: ${cleanAuthorName}${extra}`);
+    log(`➕ Queued: ${cleanName}`);
   }
 
   start() {
-    if (this.isRunning) {
-      console.log("Queue worker is already running");
-      return;
-    }
-
+    if (this.isRunning) return;
     this.isRunning = true;
-    console.log("Queue worker STARTED — processing pending tasks");
+    log("🚀 Queue Worker Active");
     this.processNext();
   }
 
   stop() {
     this.isRunning = false;
-    console.log("Queue worker STOPPED");
-
-    // Clean up tab on manual stop
-    if (this.currentPage) {
-      this.currentPage.close().catch(() => {});
-      this.currentPage = null;
-      this.currentChannelUrl = null;
-    }
+    if (this.currentPage) this.currentPage.close().catch(() => {});
+    log("🛑 Queue Worker Stopped");
   }
 
   async processNext() {
@@ -116,119 +98,89 @@ class QueueWorker {
 
     const task = this.queue.find((t) => t.status === "pending");
     if (!task) {
-      this.processing = false;
-      // Close tab if no more work
       if (this.currentPage) {
         await this.currentPage.close().catch(() => {});
         this.currentPage = null;
-        this.currentChannelUrl = null;
-        console.log("No pending tasks — tab closed");
+        this.currentChannelId = null;
       }
+      this.processing = false;
       return;
     }
 
     this.processing = true;
     task.status = "processing";
-    task.startedAt = new Date().toISOString();
     this.saveToDisk();
 
     try {
-      console.log(
-        `Processing: ${task.authorName} (attempt ${task.retryCount + 1}/5)`
-      );
       await this.handleTask(task);
-
       task.status = "done";
       task.completedAt = new Date().toISOString();
-      console.log(`SUCCESS: ${task.authorName}`);
+
+      // Success: Process next IMMEDIATELY for speed
+      this.processing = false;
+      this.processNext();
     } catch (err) {
-      console.error(`Failed: ${task.authorName} — ${err.message}`);
-      task.retryCount += 1;
+      log(`❌ Task Error [${task.authorName}]: ${err.message}`);
+      task.retryCount++;
 
       if (task.retryCount >= 5) {
         task.status = "failed";
-        task.failedAt = new Date().toISOString();
-        task.lastError = err.message;
-        console.log(`PERMANENTLY FAILED: ${task.authorName} after 5 attempts`);
-
-        // Close tab on permanent failure — fresh start for next tasks
-        if (this.currentPage) {
-          await this.currentPage.close().catch(() => {});
-          this.currentPage = null;
-          this.currentChannelUrl = null;
-          console.log("Tab closed due to permanent failure");
-        }
+        task.error = err.message;
       } else {
         task.status = "pending";
-        console.log(`Will retry ${task.authorName} (${task.retryCount}/5)`);
-        // Keep tab open for fast retry
       }
-    } finally {
-      this.processing = false;
-      this.saveToDisk();
 
-      if (this.isRunning) {
-        setTimeout(() => this.processNext(), 3000);
-      }
+      this.processing = false;
+      // Error: Wait 3s before retrying to let Discord/Network stabilize
+      setTimeout(() => this.processNext(), 3000);
+    } finally {
+      this.saveToDisk();
     }
   }
 
   async handleTask(task) {
-    const { authorName, channelLink, channelId, messageId } = task;
+    const { getPersistentBrowser } = require("../puppeteer/browser");
+    const { extractUser } = require("../puppeteer/extractUser");
 
-    let page = this.currentPage;
+    const browser = getPersistentBrowser();
+    if (!browser) throw new Error("Browser not available");
 
-    try {
-      const { getPersistentBrowser } = require("../puppeteer/browser");
-      const { extractUser } = require("../puppeteer/extractUser");
-      const { navigateToChannel } = require("../puppeteer/navigate");
-
-      const browser = getPersistentBrowser();
-
-      // Create new page only if none exists or it's closed
-      if (!page || page.isClosed()) {
-        page = await browser.newPage();
-        this.currentPage = page;
-        this.currentChannelUrl = null; // Force navigation
-        console.log("Opened new tab");
-      }
-
-      // Navigate only if channel changed
-      if (this.currentChannelUrl !== channelLink) {
-        console.log(`Navigating to: ${channelLink}`);
-        await navigateToChannel(page, channelLink);
-        this.currentChannelUrl = channelLink;
-      } else {
-        console.log(`Reusing tab — already on ${channelLink}`);
-      }
-
-      console.log(`Extracting profile: ${authorName}`);
-      const result = await extractUser(page, authorName, channelId, messageId, {
-        takeScreenshot: true,
-        closeProfileAfter: true,
-      });
-
-      if (!result) {
-        throw new Error("extractUser returned no data");
-      }
-
-      console.log(`SUCCESS — Extracted: ${result.displayName || authorName}`);
-      if (result.userId) console.log(`   User ID: ${result.userId}`);
-    } catch (error) {
-      console.error(`EXTRACTION ERROR: ${error.message}`);
-      throw error; // Let processNext handle retry/close logic
+    // 1. Manage Page Instance
+    if (!this.currentPage || this.currentPage.isClosed()) {
+      this.currentPage = await browser.newPage();
+      this.currentChannelId = null;
     }
-    // Do NOT close page here — keep it for next tasks/retries
+
+    const page = this.currentPage;
+
+    // 2. Execute Extraction
+    // We pass serverId to help extractUser navigate smarter (ASAP method)
+    const result = await extractUser(
+      page,
+      task.authorName,
+      task.channelId,
+      task.messageId,
+      {
+        serverId: task.serverId,
+        takeScreenshot: false,
+        closeProfileAfter: true,
+      }
+    );
+
+    if (!result) throw new Error("Extraction returned no data");
+
+    log(`✅ Extracted: ${result.displayName} (${result.userId || "No ID"})`);
+    return result;
   }
 
   getStats() {
-    const pending = this.queue.filter((t) => t.status === "pending").length;
-    const done = this.queue.filter((t) => t.status === "done").length;
-    const failed = this.queue.filter((t) => t.status === "failed").length;
-    return { pending, done, failed, total: this.queue.length };
+    return {
+      pending: this.queue.filter((t) => t.status === "pending").length,
+      done: this.queue.filter((t) => t.status === "done").length,
+      failed: this.queue.filter((t) => t.status === "failed").length,
+      total: this.queue.length,
+    };
   }
 }
 
-// Singleton instance
-const queueWorker = new QueueWorker();
-module.exports = queueWorker;
+module.exports = new QueueWorker();

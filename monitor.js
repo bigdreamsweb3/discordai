@@ -1,69 +1,81 @@
-// monitor.js
-
 const ChannelMonitorPlugin = require("./puppeteer/discord_plugins/chats/channelMonitor");
-const { extractUser } = require("./puppeteer/extractUser");
-
 const userQueue = require("./utils/queue-worker");
 
 async function startAdvancedMonitoring(page) {
-  if (!page) {
-    throw new Error("Page instance required");
-  }
+  if (!page) throw new Error("Page instance required");
 
-  // Get the EXACT current channel URL from the live page
-  const channelLink = await page.url();
-  console.log(`Monitoring channel: ${channelLink}`);
+  // 1. Context Setup
+  const currentUrl = await page.url();
+  const serverId = currentUrl.split("/")[4]; // Extract server ID from URL
+  console.log(`[Monitor] Tracking Server: ${serverId}`);
 
   const channelMonitor = new ChannelMonitorPlugin(page);
 
-  await channelMonitor.startMonitoring({
-    onStart: (initial) => {
-      console.log(`Loaded ${initial.length} existing messages`);
+  // 2. Optimized Initial Message Processing
+  const processMessages = (messages) => {
+    if (!messages || messages.length === 0) return;
 
-      console.log(initial);
+    // Use a local Set to avoid spamming the Queue Worker's internal logic
+    const uniqueAuthorsInBatch = new Map();
 
-      initial.forEach((msg) => {
-        if (msg.author) {
-          userQueue.addAuthor(
-            msg.channelId,
-            msg.messageId,
-            msg.author,
-            channelLink
-          );
+    messages.forEach((msg) => {
+      const name = msg.author?.trim();
+      // Filter: Ignore empty names, bots (if detectable), or system messages
+      if (!name || name === "Discord" || name === "System") return;
 
-          // extractUser(msg.author);
-        }
-      });
-    },
-  });
+      // We keep the latest messageId for that author to ensure the bot jumps
+      // to their most recent post for extraction
+      uniqueAuthorsInBatch.set(name, msg);
+    });
 
-  channelMonitor.onNewMessage((message) => {
-    console.log("\n🔔 NEW MESSAGE DETECTED 🔔");
-    console.log(`👤 Author : ${message.author}`);
-    console.log(`💬 Content: ${message.content}`);
-    if (message.timestamp) {
-      console.log(
-        `🕐 Time   : ${new Date(message.timestamp).toLocaleString()}`
+    uniqueAuthorsInBatch.forEach((msg, authorName) => {
+      const jumpUrl = `https://discord.com/channels/${msg.channelId}/${msg.messageId}`;
+
+      userQueue.addAuthor(
+        msg.channelId,
+        msg.messageId,
+        authorName,
+        jumpUrl,
+        msg.replyInfo || null
       );
-    }
-    console.log("───────────────────────────────────────────\n");
+    });
 
-    // Pass the REAL monitored channel URL
-    userQueue.addAuthor(
-      message.channelId, // ← pass it
-      message.messageId, // ← pass it
-      message.author,
-      channelLink
-    );
-  });
+    // Ensure the worker is running to handle the new items
+    if (!userQueue.isRunning) userQueue.start();
+  };
 
-  console.log("Advanced monitoring + username queue active!");
-  console.log(`All queued users will be processed using: ${channelLink}`);
+  try {
+    await channelMonitor.startMonitoring({
+      onStart: (initialMessages) => {
+        console.log(
+          `[Monitor] Found ${initialMessages.length} existing messages. Batching authors...`
+        );
+        processMessages(initialMessages);
+      },
+    });
+
+    // 3. High-Speed Listener
+    channelMonitor.onNewMessage((message) => {
+      // Log only essential info to keep console clean
+      console.log(
+        `[New Msg] @${message.author}: ${message.content?.substring(0, 50)}...`
+      );
+
+      // Process single message through the same logic
+      processMessages([message]);
+    });
+
+    console.log(`✅ Monitoring ACTIVE on ${currentUrl}`);
+  } catch (err) {
+    console.error(`[Monitor Error] Failed to start: ${err.message}`);
+    throw err;
+  }
 
   return {
     stop: async () => {
       channelMonitor.destroy();
-      console.log("Monitoring stopped");
+      userQueue.stop();
+      console.log("[Monitor] Service stopped.");
     },
   };
 }

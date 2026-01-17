@@ -1,267 +1,146 @@
 const fs = require("fs");
 const path = require("path");
 const { log } = require("../utils/logger");
-const { takeProfileScreenshot } = require("./screenshot");
 const DiscordPlugins = require("./discord_plugins");
 const { discordBotClient } = require("../discord/bot");
 const { saveBackupReport } = require("../reports/saveReport");
 const { sendReportToOwner } = require("../discord/sender");
+const { baseDir } = require("../utils/directories");
+
+async function isMessageContentReady(page, messageId, username) {
+  return await page.evaluate(
+    ({ msgId, name }) => {
+      const row = document.querySelector(`[data-list-item-id*="${msgId}"]`);
+      if (!row || row.innerText.includes("Loading")) return false;
+      const user = Array.from(
+        row.querySelectorAll('span[class*="username"]')
+      ).find((el) => el.innerText.trim() === name);
+      const content = row.querySelector('[class*="messageContent"]');
+      return !!user && !!content && content.innerText.trim().length > 0;
+    },
+    { msgId: messageId, name: username }
+  );
+}
 
 async function extractUser(page, username, channelId, messageId, options = {}) {
-  const { takeScreenshot = true, closeProfileAfter = true } = options;
-
-  if (!page) throw new Error("Page instance required");
-  if (!username || typeof username !== "string") {
-    throw new Error("Valid username/displayName is required");
-  }
-  if (!channelId || !messageId) {
-    throw new Error("channelId and messageId are required");
-  }
-
-  const channelLink = await page.url();
-
+  const { takeScreenshot = false, closeProfileAfter = true } = options;
+  if (!page || !username) throw new Error("Missing parameters");
   const cleanName = username.trim();
-  log(`Extracting profile for user: ${cleanName} (messageId: ${messageId})`);
 
-  const plugins = new DiscordPlugins(page);
-  let screenshotPath = null;
-  let userId = null;
+  // === 1. CAPTURE SERVER/CHANNEL CONTEXT FROM URL ===
+  const urlContext = await page.evaluate(() => {
+    const parts = window.location.pathname.split("/");
+    // URL: /channels/[serverId]/[channelId]
+    if (parts[1] === "channels") {
+      return {
+        sId: parts[2], // First ID is Server
+        cId: parts[3], // Second ID is Channel
+      };
+    }
+    return { sId: "@me", cId: null };
+  });
 
-  await plugins.wait.forLoad({ timeout: 3000 });
+  const finalServerId = urlContext.sId;
+  const finalChannelId = channelId || urlContext.cId;
+  const channelUrl = `https://discord.com/channels/${finalServerId}/${finalChannelId}`;
+  const deepLinkUrl = `${channelUrl}/${messageId}`;
 
   try {
-    // === STEP 0: Find the clickable username element ===
-    log(`Searching for username "${cleanName}" in message ${messageId}...`);
+    await page.keyboard.press("Escape");
 
-    const messageItemSelector = `chat-messages___chat-messages-${channelId}-${messageId}`;
+    if (!page.url().includes(finalChannelId)) {
+      await page.goto(channelUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
+    }
 
-    const authorSelector = await page.evaluate(
-      ({ name, chanId, msgId, messageItemSelector }) => {
-        const messageList =
-          document.querySelector('ol[data-list-id="chat-messages"]') ||
-          document.querySelector('ul[data-list-id="chat-messages"]');
+    let ready = await isMessageContentReady(page, messageId, cleanName);
+    if (!ready) {
+      log(`⚠️ Content missing. Jumping to: ${deepLinkUrl}`);
+      await page.goto(deepLinkUrl, {
+        waitUntil: "networkidle2",
+        timeout: 45000,
+      });
+    }
 
-        if (!messageList) return null;
-
-        // First: try to find the exact message container
-        const exactMessage = messageList.querySelector(
-          `[data-list-item-id="${messageItemSelector}"]`
-        );
-        if (exactMessage) {
-          const span = exactMessage.querySelector(
-            'span[class*="username"][role="button"]'
-          );
-          if (span && span.innerText.trim() === name.trim()) {
-            return `[data-list-item-id="${messageItemSelector}"] span[class*="username"][role="button"]`;
-          }
-        }
-
-        // Fallback: search all usernames
-        const usernames = messageList.querySelectorAll(
-          'span[class*="username"][role="button"]'
-        );
-        for (const span of usernames) {
-          if (span.innerText.trim() === name.trim()) {
-            const item = span.closest("[data-list-item-id]");
-            if (item) {
-              return `[data-list-item-id="${item.getAttribute(
-                "data-list-item-id"
-              )}"] span[class*="username"][role="button"]`;
-            }
-          }
-        }
-
-        return null;
+    // Locate and Click
+    const elementHandle = await page.evaluateHandle(
+      ({ msgId, name }) => {
+        const row = document.querySelector(`[data-list-item-id*="${msgId}"]`);
+        return Array.from(
+          row?.querySelectorAll('span[class*="username"]') || []
+        ).find((el) => el.innerText.trim() === name);
       },
-      {
-        name: cleanName,
-        chanId: channelId,
-        msgId: messageId,
-        messageItemSelector,
-      }
+      { msgId: messageId, name: cleanName }
     );
 
-    if (!authorSelector) {
-      throw new Error(`Could not find clickable username for "${cleanName}"`);
-    }
+    const element = elementHandle.asElement();
+    if (!element) throw new Error(`User "${cleanName}" not found.`);
 
-    log(`Found username selector: ${authorSelector}`);
+    await element.scrollIntoView({ block: "center", behavior: "instant" });
+    await new Promise((r) => setTimeout(r, 1000));
+    await element.hover();
+    await new Promise((r) => setTimeout(r, 500));
+    await element.click({ delay: 100 });
 
-    // === CRITICAL: Scroll the message into view ===
-    log(`Scrolling message ${messageId} into view...`);
+    // Wait for popout
+    await page.waitForSelector(
+      '.user-profile-popout, [class*="userPopoutOuter"]',
+      { visible: true, timeout: 8000 }
+    );
 
-    const messageItemId = `chat-messages___chat-messages-${channelId}-${messageId}`;
-
-    const scrolled = await page.evaluate((itemId) => {
-      const messageItem = document.querySelector(
-        `[data-list-item-id="${itemId}"]`
+    // === 2. EXTRACT DETAILED DATA FROM POPOUT ===
+    const extractedData = await page.evaluate(() => {
+      const popout = document.querySelector(
+        '.user-profile-popout, [class*="userPopoutOuter"]'
       );
-      if (messageItem) {
-        messageItem.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-          inline: "nearest",
-        });
-        return true;
+      if (!popout) return null;
+
+      // A. Extract User ID from Avatar CDN
+      let uId = null;
+      const avatarImg = popout.querySelector('img[class*="avatar"]');
+      if (avatarImg?.src.includes("avatars/")) {
+        const match = avatarImg.src.match(/avatars\/(\d+)\//);
+        if (match) uId = match[1];
       }
-      return false;
-    }, messageItemId);
+      if (!uId) {
+        const idMatch = popout.innerHTML.match(/copy-id-(\d{17,20})/);
+        uId = idMatch ? idMatch[1] : null;
+      }
 
-    if (!scrolled) {
-      throw new Error(
-        `Failed to find or scroll message container: ${messageItemId}`
-      );
-    }
+      // B. Extract Handle (Actual Username)
+      const handleEl = popout.querySelector('[class*="userTagUsername"]');
+      const handle = handleEl ? handleEl.innerText.trim() : "N/A";
 
-    log("Message scrolled into view");
-
-    // Wait for smooth scroll + rendering
-    await plugins.wait.forLoad({ timeout: 1500 });
-
-    // Now wait for the clickable username to be visible
-    await page.waitForSelector(authorSelector, {
-      visible: true,
-      timeout: 15000,
+      return { uId, handle };
     });
 
-    // Double-check visibility
-    const elementHandle = await page.$(authorSelector);
-    if (!elementHandle) {
-      throw new Error("Username element not visible after scrolling");
-    }
-
-    // Optional: hover to trigger any lazy load
-    await elementHandle.hover();
-    await plugins.wait.forLoad({ timeout: 500 });
-
-    // === Click it ===
-    await elementHandle.click({ delay: 200 });
-    log("Clicked username → profile opened");
-
-    await plugins.wait.forLoad({ timeout: 6000 });
-
-    if (takeScreenshot) {
-      screenshotPath = await takeProfileScreenshot(page, cleanName);
-      log(`Profile screenshot saved: ${screenshotPath}`);
-    }
-
-    // === Extract User ID via "More" menu ===
-    try {
-      await plugins.wait.forProfilePopupMoreButton({
-        timeout: 8000,
-        waitAfterOpen: 2000,
-      });
-
-      await page.click(
-        '[aria-label="More"][role="button"][class*="bannerButton"]'
-      );
-      log("More Action Menu Clicked!");
-
-      await plugins.wait.waitForProfileMoreActionMenu({
-        timeout: 15000,
-        waitAfterOpen: 2000,
-      });
-
-      userId = await page.evaluate(async () => {
-        const copyButtons = Array.from(
-          document.querySelectorAll('div[role="menuitem"]')
-        ).filter(
-          (el) =>
-            el.textContent?.includes("Copy User ID") ||
-            el.textContent?.includes("Copy ID")
-        );
-
-        if (copyButtons.length > 0) {
-          const button = copyButtons[0];
-          button.click();
-
-          await new Promise((resolve) => setTimeout(resolve, 500));
-
-          try {
-            return await navigator.clipboard.readText();
-          } catch {
-            const buttonId = button.id || "";
-            const match = buttonId.match(/-copy-id-(\d{17,19})$/);
-            return match ? match[1] : null;
-          }
-        }
-        return null;
-      });
-
-      log(
-        userId ? `Extracted User ID: ${userId}` : "Could not extract User ID"
-      );
-
-      await page.keyboard.press("Escape"); // Close menu
-    } catch (err) {
-      log(`Failed to extract User ID: ${err.message}`);
-    }
-
-    if (closeProfileAfter) {
-      await page.keyboard.press("Escape"); // Close profile
-    }
-
-    await page.keyboard.press("Escape"); // Close profile
-
-    await page.keyboard.press("Escape"); // Close profile
-
-    // === Build user details object ===
     const userDetails = {
       displayName: cleanName,
-      username: username,
-      userId,
-      profileScreenshot: screenshotPath,
-      source: "message_author_click",
-      channelId,
-      serverId: channelLink.match(/channels\/(\d+|\@me)\//)[1], // extracts guild ID or @me
+      username: extractedData?.handle || "N/A", // This was N/A before
+      userId: extractedData?.uId || "Unknown",
+      channelId: finalChannelId,
       messageId,
+      serverId: finalServerId, // This will now be the real ID instead of @me
       extractedAt: new Date().toISOString(),
     };
 
-    // === Send report to owner via Discord bot ===
-    if (discordBotClient.isReady() && userId) {
-      try {
-        const owner = await discordBotClient.users.fetch(
-          discordBotClient.ownerId
-        );
-        const attachments = screenshotPath ? [screenshotPath] : [];
+    if (closeProfileAfter) await page.keyboard.press("Escape");
 
-        // Assuming sendReportToOwner signature: (client, ownerUser, attachments[], userData)
-        // Adjust if your function signature is different
-        await sendReportToOwner(
-          discordBotClient,
-          owner,
-          attachments,
-          userDetails
-        );
-
-        log("Report successfully sent to bot owner via DM");
-      } catch (err) {
-        log(`Failed to send report to owner: ${err.message}`);
-      }
-    } else {
-      log("Skipping DM report (bot not ready or no user ID extracted)");
-    }
-
-    // === Always save local backup ===
     saveBackupReport(null, userDetails);
-    log("Local backup report saved");
 
-    // === Return result ===
-    return userDetails; // Single object (not array) — consistent with extracting one user
-  } catch (error) {
-    log(`Error during user extraction: ${error.message}`);
-    try {
-      const errorPath = `error-extraction-${cleanName.replace(
-        /[^a-zA-Z0-9]/g,
-        "_"
-      )}-${Date.now()}.png`;
-      await page.screenshot({ path: errorPath, fullPage: true });
-      log(`Debug screenshot saved: ${errorPath}`);
-    } catch (screenshotErr) {
-      // Ignore
+    if (discordBotClient.isReady() && userDetails.userId !== "Unknown") {
+      const owner = await discordBotClient.users.fetch(
+        discordBotClient.ownerId
+      );
+      await sendReportToOwner(discordBotClient, owner, userDetails);
     }
-    return null; // or {} if you prefer
+
+    return userDetails;
+  } catch (error) {
+    log(`❌ Extraction Failed: ${error.message}`);
+    return null;
   }
 }
 

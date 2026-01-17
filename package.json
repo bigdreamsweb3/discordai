@@ -60,6 +60,10 @@
         "from": "config.json",
         "to": "."
       }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/puppeteer/.local-chromium/**/*"
     ]
   }
 }

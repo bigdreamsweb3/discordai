@@ -110,7 +110,7 @@ class WaitPlugin {
   async forLoad(options = {}) {
     const { timeout = 2000 } = options;
 
-    log(`Wait page needs to load!`);
+    log("Waiting...");
 
     await new Promise((r) => setTimeout(r, timeout));
   }

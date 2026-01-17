@@ -12,26 +12,26 @@ const { app, BrowserWindow, Tray, Menu, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
-// Global variables
+// ====================
+// Global State
+// ====================
 let mainWindow = null;
 let tray = null;
 let stopFunctions = []; // { stop, channelUrl, page }
 let browser = null;
 let discordBotClient = null;
-let CHANNEL_URLS = []; // Default fallback
+let CHANNEL_URLS = []; // Loaded from config
 let saveChannels = () => console.warn("saveChannels not available yet");
-let isMonitoringActive = false;
+let isMonitoringActive = false; // Tracks monitoring state
 
-// === SAFE LOGGING SYSTEM ===
-// We keep original console.log for terminal output
+// ====================
+// Safe Logging System
+// ====================
 const originalConsoleLog = console.log;
 
-// Our central logging function — used everywhere
 function sendLog(message) {
-  // 1. Always print to terminal (critical for debugging packaged app via cmd)
-  originalConsoleLog(message);
+  originalConsoleLog(message); // Always log to terminal
 
-  // 2. Send to renderer UI if window is ready
   if (mainWindow && mainWindow.webContents) {
     mainWindow.webContents.send("log-update", {
       timestamp: new Date().toISOString(),
@@ -40,13 +40,12 @@ function sendLog(message) {
   }
 }
 
-// Override console.log so any accidental console.log() still goes through sendLog
-console.log = (...args) => {
-  sendLog(args.join(" "));
-};
+// Override console.log globally for safety
+console.log = (...args) => sendLog(args.join(" "));
 
-// Now use sendLog() everywhere instead of console.log()
-
+// ====================
+// Window & Tray
+// ====================
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1000,
@@ -82,6 +81,7 @@ function createTray() {
 
   tray = new Tray(iconPath);
   tray.setToolTip("DCAI");
+
   tray.on("click", () => {
     mainWindow?.isVisible() ? mainWindow.hide() : mainWindow.show();
   });
@@ -93,16 +93,34 @@ function createTray() {
   tray.setContextMenu(contextMenu);
 }
 
-function startDiscordBot() {
-  if (!discordBotClient) {
-    try {
-      ({ discordBotClient } = require("./discord/bot"));
-    } catch (err) {
-      sendLog(`Failed to start Discord bot: ${err.message}`);
-    }
-  }
+// ====================
+// Initial State Sync
+// ====================
+function sendInitialState() {
+  if (!mainWindow?.webContents) return;
+
+  // Send channels list
+  mainWindow.webContents.send("channels-update", CHANNEL_URLS);
+
+  // Send current target display text
+  const targetText =
+    CHANNEL_URLS.length === 1
+      ? CHANNEL_URLS[0]
+      : CHANNEL_URLS.length > 0
+      ? `${CHANNEL_URLS.length} channels active`
+      : "No channels active";
+
+  mainWindow.webContents.send("current-target-update", targetText);
+
+  // Send monitoring status
+  mainWindow.webContents.send("monitoring-status", isMonitoringActive);
+
+  sendLog("Initial app state sent to renderer");
 }
 
+// ====================
+// Config Loading
+// ====================
 function loadConfig() {
   const dotenv = require("dotenv");
   const envPath = app.isPackaged
@@ -123,7 +141,9 @@ function loadConfig() {
   try {
     const configModule = require("./config/env");
     CHANNEL_URLS = configModule.CHANNEL_URLS || [];
-    saveChannels = configModule.saveChannels || (() => sendLog("saveChannels not implemented"));
+    saveChannels =
+      configModule.saveChannels ||
+      (() => sendLog("saveChannels not implemented"));
 
     sendLog(`Loaded ${CHANNEL_URLS.length} channel(s) from config`);
   } catch (err) {
@@ -134,92 +154,119 @@ function loadConfig() {
   }
 }
 
+// ====================
+// Discord Bot
+// ====================
+function startDiscordBot() {
+  if (!discordBotClient) {
+    try {
+      ({ discordBotClient } = require("./discord/bot"));
+    } catch (err) {
+      sendLog(`Failed to start Discord bot: ${err.message}`);
+    }
+  }
+}
+
+// ====================
+// Monitoring Logic
+// ====================
+// In app.js — replace the current authentication block in startMonitoring()
+
 async function startMonitoring() {
+  if (isMonitoringActive) {
+    sendLog("Monitoring already active");
+    return;
+  }
+
   try {
-    const { log } = require("./utils/logger");
     const { launchBrowser } = require("./puppeteer/browser");
-    const { ensureAuthenticated } = require("./puppeteer/discordAuth");
+    const { loginToDiscord } = require("./puppeteer/login"); // ← the same function as in index.js
     const { navigateToChannel } = require("./puppeteer/navigate");
     const { startAdvancedMonitoring } = require("./monitor");
     const userQueue = require("./utils/queue-worker");
 
-    log("Launching browser...");
-    sendLog("Launching browser...");
+    sendLog("Launching browser for authentication...");
 
-    ({ browser } = await launchBrowser({
-      headful: false,
-      usePersistentSession: true,
-    }));
+    // Do this:
+    const { DISCORD_EMAIL, DISCORD_PASSWORD } = require("./config/env");
 
-    const authPage = await browser.newPage();
-    await ensureAuthenticated(authPage);
-    await authPage.close();
-    sendLog("Authentication completed — monitoring multiple channels");
+    // Then use them normally:
+    const authResult = await loginToDiscord(
+      DISCORD_EMAIL,
+      DISCORD_PASSWORD,
+      null
+    );
+
+    if (!authResult.authenticated) {
+      sendLog("❌ Authentication failed");
+      return;
+    }
+
+    sendLog("✅ Discord authentication successful!");
+    browser = authResult.browser;
 
     stopFunctions = [];
 
+    sendLog("Starting monitoring for all channels...");
+
     for (const channelUrl of CHANNEL_URLS) {
-      sendLog(`Setting up: ${channelUrl}`);
+      sendLog(`Setting up monitoring → ${channelUrl}`);
+
       const page = await browser.newPage();
 
       try {
         await navigateToChannel(page, channelUrl);
         const { stop } = await startAdvancedMonitoring(page);
+
         stopFunctions.push({ stop, channelUrl, page });
+
         sendLog(`Monitoring ACTIVE: ${channelUrl}`);
       } catch (err) {
-        sendLog(`Failed: ${channelUrl} — ${err.message}`);
+        sendLog(`Failed to setup monitoring for ${channelUrl}: ${err.message}`);
         await page.close();
       }
     }
 
     if (stopFunctions.length === 0) {
-      sendLog("ERROR: No channels were successfully monitored!");
+      sendLog("ERROR: No channels were successfully started!");
+      await browser.close();
+      browser = null;
       return;
     }
 
-    sendLog(`Monitoring ACTIVE for ${stopFunctions.length} channel(s) 24/7!`);
+    sendLog(`Monitoring ACTIVE for ${stopFunctions.length} channel(s)`);
 
-    if (mainWindow?.webContents) {
-      mainWindow.webContents.send("channels-update", CHANNEL_URLS);
-      const targetText =
-        CHANNEL_URLS.length === 1
-          ? CHANNEL_URLS[0]
-          : `${CHANNEL_URLS.length} channels active`;
-      mainWindow.webContents.send("current-target-update", targetText);
-    }
+    // UI updates
+    mainWindow?.webContents.send("monitoring-status", true);
+    mainWindow?.webContents.send("channels-update", CHANNEL_URLS);
+    mainWindow?.webContents.send(
+      "current-target-update",
+      stopFunctions.length === 1
+        ? stopFunctions[0].channelUrl
+        : `${stopFunctions.length} channels active`
+    );
 
     isMonitoringActive = true;
-    mainWindow?.webContents.send("monitoring-status", true);
-
     userQueue.start();
-    sendLog("Queue worker STARTED — processing users");
+    sendLog("Queue worker STARTED");
   } catch (err) {
-    console.error("Fatal error in monitoring:", err);
-    sendLog(`FATAL ERROR: ${err.message}`);
+    sendLog(`FATAL ERROR during monitoring startup: ${err.message}`);
+    if (browser) {
+      await browser.close().catch(() => {});
+      browser = null;
+    }
   }
 }
-
+// ====================
 // IPC Handlers
-ipcMain.on("start-queue", () => {
-  const userQueue = require("./utils/queue-worker");
-  userQueue.start();
-  sendLog("Queue processing started manually");
-});
-
-ipcMain.on("stop-queue", () => {
-  const userQueue = require("./utils/queue-worker");
-  userQueue.stop?.();
-  sendLog("Queue processing stopped");
-});
-
+// ====================
 ipcMain.on("add-channel", (event, { serverId, channelId }) => {
   const newUrl = `https://discord.com/channels/${serverId}/${channelId}`;
   const updatedUrls = [...CHANNEL_URLS, newUrl];
   saveChannels(updatedUrls);
   CHANNEL_URLS = updatedUrls;
 
-  sendLog(`Added and saved channel: ${newUrl}`);
+  sendLog(`Added channel: ${newUrl}`);
   mainWindow?.webContents.send("channels-update", updatedUrls);
   mainWindow?.webContents.send("current-target-update", newUrl);
 });
@@ -238,18 +285,19 @@ ipcMain.on("remove-channel", (event, channelData) => {
     stop?.();
     page?.close();
     stopFunctions.splice(index, 1);
-    sendLog(`Stopped and removed: ${url}`);
+    sendLog(`Stopped monitoring: ${url}`);
   }
 
   const remainingUrls = stopFunctions.map((item) => item.channelUrl);
   mainWindow?.webContents.send("channels-update", remainingUrls);
-  const targetText =
+  mainWindow?.webContents.send(
+    "current-target-update",
     remainingUrls.length === 1
       ? remainingUrls[0]
       : remainingUrls.length > 0
       ? `${remainingUrls.length} channels active`
-      : "No channels active";
-  mainWindow?.webContents.send("current-target-update", targetText);
+      : "No channels active"
+  );
 });
 
 ipcMain.on("start-monitoring", async () => {
@@ -257,29 +305,26 @@ ipcMain.on("start-monitoring", async () => {
     sendLog("Monitoring already running");
     return;
   }
-  try {
-    startDiscordBot();
-    await startMonitoring();
-    isMonitoringActive = true;
-    mainWindow?.webContents.send("monitoring-status", true);
-  } catch (err) {
-    sendLog(`Failed to start monitoring: ${err.message}`);
-  }
+
+  await startMonitoring();
+
+  startDiscordBot();
 });
 
 ipcMain.on("stop-monitoring", async () => {
   if (!isMonitoringActive) {
-    sendLog("Monitoring not running");
+    sendLog("Monitoring not active");
     return;
   }
 
-  sendLog("Stopping all monitoring from UI request...");
+  sendLog("Stopping all monitoring...");
 
-  for (const { stop, page, channelUrl } of stopFunctions) {
+  for (const { stop, page, browser, channelUrl } of stopFunctions) {
     try {
       if (stop) await stop();
       if (page) await page.close();
-      sendLog(`Stopped monitoring: ${channelUrl}`);
+      if (browser) await browser.close();
+      sendLog(`Stopped: ${channelUrl}`);
     } catch (e) {
       console.error(e);
     }
@@ -293,7 +338,21 @@ ipcMain.on("stop-monitoring", async () => {
   mainWindow?.webContents.send("current-target-update", "Monitoring stopped");
 });
 
-// App Ready
+ipcMain.on("start-queue", () => {
+  const userQueue = require("./utils/queue-worker");
+  userQueue.start();
+  sendLog("Queue processing started manually");
+});
+
+ipcMain.on("stop-queue", () => {
+  const userQueue = require("./utils/queue-worker");
+  userQueue.stop?.();
+  sendLog("Queue processing stopped");
+});
+
+// ====================
+// App Lifecycle
+// ====================
 app.whenReady().then(async () => {
   sendLog("App starting...");
 
@@ -302,17 +361,21 @@ app.whenReady().then(async () => {
   sendLog("Creating window...");
   createWindow();
 
-  sendLog("Window created and UI loading...");
-
   sendLog("Creating system tray icon...");
   createTray();
+
+  // Send initial state once renderer is loaded
+  mainWindow.webContents.once("did-finish-load", () => {
+    sendInitialState();
+    sendLog("Renderer fully loaded — initial state synchronized");
+  });
 
   sendLog("App ready. Waiting for user action.");
 });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
-    // Keep running in tray
+    // Keep running in background (tray)
   }
 });
 
@@ -324,7 +387,7 @@ app.on("activate", () => {
 
 // Graceful shutdown
 app.on("before-quit", async (event) => {
-  if (browser || stopFunctions.length > 0) {
+  if (browser || stopFunctions.length > 0 || isMonitoringActive) {
     event.preventDefault();
     sendLog("Shutting down gracefully...");
 
@@ -332,9 +395,9 @@ app.on("before-quit", async (event) => {
       try {
         if (stop) await stop();
         if (page) await page.close();
-        sendLog(`Stopped monitoring: ${channelUrl}`);
+        sendLog(`Cleaned up: ${channelUrl}`);
       } catch (e) {
-        console.error(`Error stopping ${channelUrl}:`, e);
+        console.error(e);
       }
     }
 

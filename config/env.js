@@ -49,10 +49,11 @@ function saveChannels(urls) {
 }
 
 module.exports = {
-  EMAIL: process.env.DISCORD_EMAIL,
-  PASSWORD: process.env.DISCORD_PASSWORD,
+  DISCORD_EMAIL: process.env.DISCORD_EMAIL,
+  DISCORD_PASSWORD: process.env.DISCORD_PASSWORD,
   CHANNEL_URLS,
   saveChannels, // ← This is required!
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   OWNER_ID: process.env.OWNER_ID,
+  REPORT_CHANNEL_ID: process.env.REPORT_CHANNEL_ID,
 };

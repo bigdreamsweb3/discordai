@@ -1,88 +1,122 @@
-// puppeteer/discordAuth.js
-const fs = require("fs");
-const path = require("path");
+// puppeteer/discordAuth.js (Handles frame detach & stale sessions)
 const { log } = require("../utils/logger");
-const { loginToDiscord } = require("./login"); // Optional: only if you keep automated fallback
+const { launchBrowser, getPersistentBrowser } = require("./browser");
+const { loginToDiscord } = require("./login");
 
-const TOKEN_FILE = path.join(__dirname, "../discord/discord-token.txt");
+async function ensureAuthenticated(email, password, maxRetries = 3) {
+  let retries = 0;
 
-async function ensureAuthenticated(page) {
-  // Always start from the app to leverage persistent session
-  await page.goto("https://discord.com/app", {
-    waitUntil: "domcontentloaded",
-    timeout: 90000,
-  });
-
-  let loggedIn = false;
-
-  // Step 1: Try token injection if token file exists
-  if (fs.existsSync(TOKEN_FILE)) {
-    const token = fs.readFileSync(TOKEN_FILE, "utf8").trim();
-
-    log("Attempting login via saved token injection...");
-    await page.evaluate((t) => {
-      localStorage.setItem('"token"', `"${t}"`);
-      window.location.reload();
-    }, token);
-
+  while (retries < maxRetries) {
     try {
-      await page.waitForSelector('nav[aria-label="Servers sidebar"]', {
-        timeout: 30000,
-      });
-      log("Logged in successfully via saved token");
-      loggedIn = true;
-    } catch (e) {
-      log("Saved token invalid or expired");
-      // Optionally delete bad token
-      // fs.unlinkSync(TOKEN_FILE);
-    }
-  }
+      retries++;
+      log(`Authentication attempt #${retries}/${maxRetries}...`);
 
-  // Step 2: Check if already logged in via persistent session (most common success case)
-  if (!loggedIn) {
-    const currentUrl = await page.url();
-    if (currentUrl.includes("/channels") || currentUrl.includes("/app")) {
+      let browser, page;
+
       try {
-        await page.waitForSelector('nav[aria-label="Servers sidebar"]', {
-          timeout: 15000,
+        // Try to reuse persistent browser
+        browser = getPersistentBrowser();
+        page = await browser.newPage();
+        log("✅ Reusing persistent browser");
+      } catch (error) {
+        // Persistent browser dead or not initialized
+        log(
+          `⚠️  Persistent browser unavailable (${error.message}) — launching new one`
+        );
+        const result = await launchBrowser({
+          headful: false,
+          usePersistentSession: true,
         });
-        log("Already logged in via persistent session! (No action needed)");
-        loggedIn = true;
+        browser = result.browser;
+        page = result.page;
+      }
 
-        // Bonus: Backup the current token if not already saved
-        if (!fs.existsSync(TOKEN_FILE)) {
-          try {
-            const currentToken = await page.evaluate(() => {
-              const t = localStorage.getItem('"token"');
-              return t ? t.replace(/^"|"$/g, "") : null;
-            });
-            if (currentToken) {
-              fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
-              fs.writeFileSync(TOKEN_FILE, currentToken);
-              log("Current session token backed up for future use");
-            }
-          } catch (backupErr) {
-            log("Could not backup token");
-          }
+      // Validate page is usable BEFORE navigation
+      if (!page || page.isClosed?.()) {
+        log("❌ Page is closed — creating new page");
+        page = await browser.newPage();
+      }
+
+      // Add frame detach protection
+      let frameDetached = false;
+      const detachHandler = () => {
+        frameDetached = true;
+        log("⚠️  Frame detached detected");
+      };
+
+      page.once("framedetached", detachHandler);
+
+      try {
+        // Try to navigate with protection
+        await navigateWithRetry(page, "https://discord.com/app", 3);
+
+        if (frameDetached) {
+          log("⚠️  Frame detached during navigation — retrying");
+          page.off("framedetached", detachHandler);
+          await page.close().catch(() => {});
+          continue;
         }
-      } catch (e) {
-        log("Sidebar not found despite app URL — session may be invalid");
+
+        // Attempt login
+        await loginToDiscord(page, email, password);
+        log("✅ Authentication successful!");
+        page.off("framedetached", detachHandler);
+        return true;
+      } catch (error) {
+        page.off("framedetached", detachHandler);
+
+        if (error.message.includes("frame was detached")) {
+          log("❌ Frame detached during auth — session invalid");
+          await page.close().catch(() => {});
+          continue;
+        }
+
+        if (error.message.includes("Target closed")) {
+          log("❌ Browser target closed — session lost");
+          await page.close().catch(() => {});
+          continue;
+        }
+
+        throw error;
+      }
+    } catch (error) {
+      log(`❌ Authentication attempt #${retries} failed: ${error.message}`);
+
+      if (retries < maxRetries) {
+        const backoffDelay = 5000 * retries; // 5s, 10s, 15s
+        log(`⏳ Backing off ${backoffDelay / 1000}s before retry...`);
+        await new Promise((r) => setTimeout(r, backoffDelay));
       }
     }
   }
 
-  // Step 3: Final fallback — automated email/password login (rarely needed)
-  if (!loggedIn) {
-    log("No valid session or token — falling back to email/password login");
-    const { EMAIL, PASSWORD } = require("../config/env");
-    await loginToDiscord(page, EMAIL, PASSWORD);
-    loggedIn = true; // Assume success since loginToDiscord loops until success or fatal error
-  }
+  throw new Error(
+    `Failed to authenticate after ${maxRetries} attempts — session may be permanently invalid`
+  );
+}
 
-  if (loggedIn) {
-    log("Authentication successful — ready to proceed");
-  } else {
-    throw new Error("Failed to authenticate with Discord after all attempts");
+// Navigate with automatic retry on frame detach
+async function navigateWithRetry(page, url, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      log(`Navigating to ${url} (attempt ${attempt}/${maxAttempts})...`);
+
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 45000,
+      });
+
+      return; // Success
+    } catch (error) {
+      if (error.message.includes("frame was detached")) {
+        log(`⚠️  Frame detached on attempt ${attempt}`);
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 2000)); // Wait before retry
+          continue;
+        }
+      }
+      throw error;
+    }
   }
 }
 

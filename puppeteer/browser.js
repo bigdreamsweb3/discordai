@@ -1,15 +1,18 @@
 // puppeteer/browser.js
-
-const puppeteer = require("puppeteer-extra");
+const puppeteer = require("puppeteer-core");
 const path = require("path");
 const { log } = require("../utils/logger");
 
 // Stealth plugin setup
 const stealth = require("puppeteer-extra-plugin-stealth");
-const enabledEvasions = new Set(stealth.availableEvasions);
-enabledEvasions.delete("sourceurl"); // Optional: avoids known issues
+const puppeteerExtra = require("puppeteer-extra");
 
-puppeteer.use(stealth({ enabledEvasions }));
+const enabledEvasions = new Set(stealth.availableEvasions);
+enabledEvasions.delete("sourceurl");
+enabledEvasions.delete("chrome.runtime"); // Often triggers detection
+enabledEvasions.delete("navigator.permissions");
+
+puppeteerExtra.use(stealth({ enabledEvasions }));
 
 let persistentBrowser = null;
 
@@ -24,11 +27,13 @@ async function launchBrowser({
   );
 
   const launchOptions = {
-    headless: headful ? false : "new", // "new" for modern headless, false for visible
-    defaultViewport: null, // THIS IS KEY: Let the browser use full window size
+    headless: headful ? false : "new",
+    channel: "chrome",
+    defaultViewport: null,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage", // Memory optimization
       "--disable-infobars",
       "--disable-blink-features=AutomationControlled",
       "--disable-web-security",
@@ -41,66 +46,93 @@ async function launchBrowser({
       "--disable-background-timer-throttling",
       "--disable-renderer-backgrounding",
       "--disable-backgrounding-occluded-windows",
-      "--disable-features=TranslateUI",
-      "--disable-ipc-flooding-protection",
+      "--mute-audio",
       "--no-first-run",
       "--no-default-browser-check",
-      // Critical fixes for Windows + packaged apps
-      "--disable-gpu", // Often helps with spawn issues
-      "--disable-software-rasterizer",
-      "--disable-background-networking",
-      "--disable-sync",
+      "--disable-sync", // Speed optimization
+      "--disable-breakpad", // Crash reporter
       "--metrics-recording-only",
-      "--mute-audio",
+      // Better user agent
+      `--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
     ],
-    ignoreDefaultArgs: [
-      "--enable-automation",
-      "--enable-blink-features=AutomationControlled",
-    ],
+    ignoreDefaultArgs: ["--enable-automation"],
   };
 
   if (usePersistentSession) {
     launchOptions.userDataDir = path.resolve(__dirname, "../discord-session");
   }
 
-  // Help Windows spawn Chrome properly in packaged apps
   if (process.platform === "win32") {
     launchOptions.args.push("--disable-features=WinDelayAsh");
     launchOptions.args.push("--force-color-profile=srgb");
+  } else if (process.platform === "linux") {
+    launchOptions.args.push("--disable-features=TranslateUI");
   }
 
-  const browser = await puppeteer.launch(launchOptions);
+  const browser = await puppeteerExtra.launch(launchOptions);
 
   if (usePersistentSession) {
     persistentBrowser = browser;
-    log("Persistent browser saved for reuse (new tabs can be opened)");
+    log("✅ Persistent browser saved for reuse");
   }
 
   const page = await browser.newPage();
 
-  // Manual stealth tweaks
+  // Ultra stealth + CAPTCHA avoidance
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, "webdriver", {
-      get: () => false,
-    });
+    // Remove webdriver
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
     delete navigator.__proto__.webdriver;
 
-    // Optional: hide puppeteer traces
+    // Add chrome object
     window.chrome = { runtime: {} };
-    window.puppeteer = undefined;
+
+    // Override permissions
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) =>
+      parameters.name === "notifications"
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters);
+
+    // Fake plugins
+    Object.defineProperty(navigator, "plugins", {
+      get: () => [1, 2, 3, 4, 5],
+    });
+
+    // Fake languages
+    Object.defineProperty(navigator, "languages", {
+      get: () => ["en-US", "en"],
+    });
+
+    // Realistic vendor
+    Object.defineProperty(navigator, "vendor", {
+      get: () => "Google Inc.",
+    });
+
+    // Canvas fingerprint spoofing (tricks CAPTCHA)
+    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function () {
+      if (this.width === 280 && this.height === 60) {
+        return (
+          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAA8CAYAAABv" +
+          "2cqaAAAA+klEQVR4nO3XMQrCQBCG4Q=="
+        );
+      }
+      return originalToDataURL.call(this);
+    };
   });
 
-  // REMOVED THIS LINE COMPLETELY:
-  // await page.setViewport({ width: 1920, height: 1080 });
-
-  // Optional: For extra realism in headful mode, maximize the first window
   if (headful) {
-    const session = await page.target().createCDPSession();
-    const { windowId } = await session.send("Browser.getWindowForTarget");
-    await session.send("Browser.setWindowBounds", {
-      windowId,
-      bounds: { windowState: "maximized" },
-    });
+    try {
+      const session = await page.target().createCDPSession();
+      const { windowId } = await session.send("Browser.getWindowForTarget");
+      await session.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "maximized" },
+      });
+    } catch (e) {
+      log("Could not maximize window:", e.message);
+    }
   }
 
   return { browser, page };
@@ -117,10 +149,7 @@ async function closeBrowser(browser) {
   if (browser && browser.isConnected?.()) {
     await browser.close();
     log("Browser closed.");
-
-    if (browser === persistentBrowser) {
-      persistentBrowser = null;
-    }
+    if (browser === persistentBrowser) persistentBrowser = null;
   }
 }
 

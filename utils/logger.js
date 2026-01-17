@@ -1,50 +1,29 @@
-// puppeteer/utils/logger.js
-const path = require('path');
-const fs = require('fs');
+// utils/logger.js
+const fs = require("fs");
+const path = require("path");
 
-// Ensure logs directory exists
-const logsDir = path.join(__dirname, '..', '..', 'logs');
+// Create logs directory if it doesn't exist
+const logsDir = path.join(__dirname, "../logs");
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true });
 }
 
-const logFile = path.join(logsDir, 'discord-bot.log');
+// Log file path
+const logFile = path.join(logsDir, "app.log");
 
-function log(message, level = 'INFO') {
+function log(message) {
   const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] [${level}] ${message}`;
-  
+  const logMessage = `[${timestamp}] [INFO] ${message}`;
+
   // Console output
   console.log(logMessage);
-  
+
   // File output
   try {
-    fs.appendFileSync(logFile, logMessage + '\n');
+    fs.appendFileSync(logFile, logMessage + "\n");
   } catch (error) {
-    console.error(`Failed to write to log file: ${error.message}`);
+    console.error("Failed to write to log file:", error.message);
   }
 }
 
-function error(message) {
-  log(message, 'ERROR');
-}
-
-function warn(message) {
-  log(message, 'WARN');
-}
-
-function info(message) {
-  log(message, 'INFO');
-}
-
-function debug(message) {
-  log(message, 'DEBUG');
-}
-
-module.exports = {
-  log,
-  error,
-  warn,
-  info,
-  debug
-};
+module.exports = { log };
